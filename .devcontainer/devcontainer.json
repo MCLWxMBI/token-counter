@@ -6,7 +6,8 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "openai.chatgpt"
+        "openai.chatgpt",
+        "ms-python.python"
       ]
     }
   }

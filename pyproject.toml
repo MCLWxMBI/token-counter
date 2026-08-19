@@ -1,0 +1,21 @@
+[project]
+name = "token-counter"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Rayan-Wong", email = "134691628+Rayan-Wong@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=0.122.0",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+token-counter = "token_counter:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
