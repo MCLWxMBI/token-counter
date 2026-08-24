@@ -3,6 +3,7 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
+  "postCreateCommand": "uv sync && uv run playwright install --with-deps chromium",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -10,5 +11,11 @@
         "ms-python.python"
       ]
     }
-  }
+  },
+  "runArgs": [
+    "--cap-add=SYS_ADMIN"
+  ],
+  "securityOpt": [
+    "seccomp=unconfined"
+  ],
 }
