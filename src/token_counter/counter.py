@@ -170,7 +170,10 @@ def extract_page_text(html: str) -> str:
         "header",
         "footer",
         "aside",
-        "form",
+        "input",
+        "button",
+        "select",
+        "textarea",
         "dialog",
     )
     for element in soup.find_all(non_content_tags):
