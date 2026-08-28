@@ -23,6 +23,96 @@ from playwright.sync_api import Page, sync_playwright
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_INPUT_PRICE = 3.0
 DEFAULT_OUTPUT_DIR = Path("tmp")
+PDF_SOURCE_NAMES = frozenset(
+    {
+        "Victorian Environmental Water Holder",
+        "Scrutiny of Acts and Regulations Committee – environment filter",
+        "Joint Treaties – environment-related only",
+    }
+)
+
+STABLE_CONTENT_SCRIPT = """
+({ minimumCharacters, quietMilliseconds, timeoutMilliseconds }) =>
+  new Promise((resolve, reject) => {
+    const selectors = ["main", "[role='main']", "article", "#app", "body"];
+    const target = selectors
+      .map((selector) => document.querySelector(selector))
+      .find((element) => element !== null);
+
+    if (!target) {
+      reject(new Error("No page content root was found"));
+      return;
+    }
+
+    const loadingPlaceholders = [
+      "loading",
+      "slow connection",
+      "try refresh",
+      "please wait",
+      "enable javascript",
+    ];
+    let quietTimer;
+    let timeoutTimer;
+    let lastText = "";
+
+    const normalizedText = () =>
+      (target.innerText || "").replace(/\\s+/g, " ").trim();
+
+    const isMeaningful = (text) => {
+      if (text.length < minimumCharacters) {
+        return false;
+      }
+      const lowerText = text.toLowerCase();
+      return !loadingPlaceholders.some(
+        (placeholder) =>
+          lowerText === placeholder ||
+          (lowerText.length < 500 && lowerText.includes(placeholder)),
+      );
+    };
+
+    const cleanup = () => {
+      observer.disconnect();
+      clearTimeout(quietTimer);
+      clearTimeout(timeoutTimer);
+    };
+
+    const checkContent = () => {
+      clearTimeout(quietTimer);
+      lastText = normalizedText();
+      if (!isMeaningful(lastText)) {
+        return;
+      }
+      quietTimer = setTimeout(() => {
+        const currentText = normalizedText();
+        if (currentText === lastText && isMeaningful(currentText)) {
+          cleanup();
+          resolve(true);
+        }
+      }, quietMilliseconds);
+    };
+
+    const observer = new MutationObserver(checkContent);
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: false,
+    });
+
+    timeoutTimer = setTimeout(() => {
+      cleanup();
+      const preview = lastText.slice(0, 160);
+      reject(
+        new Error(
+          `Page content did not stabilize within ${timeoutMilliseconds}ms; ` +
+          `last text length=${lastText.length}; preview=${JSON.stringify(preview)}`,
+        ),
+      );
+    }, timeoutMilliseconds);
+
+    checkContent();
+  })
+"""
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -156,6 +246,23 @@ def fetch_rendered_html(page: Page, url: str) -> str:
         timeout=30_000,
     )
     return page.content()
+
+
+def wait_for_stable_page_content(
+    page: Page,
+    minimum_characters: int = 200,
+    quiet_milliseconds: int = 750,
+    timeout_milliseconds: int = 30_000,
+) -> None:
+    """Wait until meaningful page text stops receiving relevant DOM mutations."""
+    page.evaluate(
+        STABLE_CONTENT_SCRIPT,
+        {
+            "minimumCharacters": minimum_characters,
+            "quietMilliseconds": quiet_milliseconds,
+            "timeoutMilliseconds": timeout_milliseconds,
+        },
+    )
 
 
 def extract_page_text(html: str) -> str:
@@ -342,6 +449,28 @@ def extract_source_text(source: Source, page: Page, rendered_html: str) -> str:
     return extract_page_text(rendered_html)
 
 
+def is_pdf_source(source: Source) -> bool:
+    return source.name in PDF_SOURCE_NAMES
+
+
+def process_source_content(source: Source, page: Page) -> str:
+    """Render one source, wait for stability, and return token-count text."""
+    fetch_rendered_html(page, source.url)
+    wait_for_stable_page_content(page)
+    rendered_html = page.content()
+    page_text = extract_source_text(source, page, rendered_html)
+
+    if not page_text:
+        raise ValueError("rendered page contained no readable text")
+    if not is_pdf_source(source) and len(page_text) < 200:
+        preview = page_text[:160]
+        raise ValueError(
+            "rendered page contained fewer than 200 extracted characters; "
+            f"length={len(page_text)}; preview={preview!r}"
+        )
+    return page_text
+
+
 def source_slug(source: Source) -> str:
     """Return a stable, filesystem-safe slug for a source."""
     normalized = unicodedata.normalize("NFKD", source.name).encode("ascii", "ignore")
@@ -447,15 +576,10 @@ def process_sources(
                     if cached is None:
                         page = browser.new_page()
                         try:
-                            rendered_html = fetch_rendered_html(page, source.url)
-                            page_text = extract_source_text(
-                                source, page, rendered_html
-                            )
+                            page_text = process_source_content(source, page)
                         finally:
                             page.close()
 
-                        if not page_text:
-                            raise ValueError("rendered page contained no readable text")
                         output_path = write_processed_text(source, page_text, output_dir)
                         input_tokens = count_input_tokens(page_text, model, client)
                         cache[source.url] = (page_text, input_tokens)
