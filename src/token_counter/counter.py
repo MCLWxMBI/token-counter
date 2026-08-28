@@ -3,10 +3,13 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import urljoin
 
 import anthropic
 import matplotlib
+import pdfplumber
 
 matplotlib.use("Agg")
 
@@ -205,6 +208,140 @@ def extract_page_text(html: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def normalized_label(value: str) -> str:
+    """Normalize human-readable labels for resilient source-specific matching."""
+    return " ".join(value.split()).casefold()
+
+
+def is_pdf_link(href: str | None) -> bool:
+    return bool(href and href.casefold().split("?", 1)[0].endswith(".pdf"))
+
+
+def extract_pdf_text(page: Page, pdf_url: str) -> str:
+    """Download a PDF through Playwright and return normalized embedded text."""
+    absolute_url = urljoin(page.url, pdf_url)
+    response = page.context.request.get(absolute_url, timeout=30_000)
+    if not response.ok:
+        raise ValueError(
+            f"PDF download failed with HTTP {response.status} "
+            f"{response.status_text}: {absolute_url}"
+        )
+
+    try:
+        with pdfplumber.open(BytesIO(response.body())) as pdf:
+            extracted_pages = [pdf_page.extract_text() or "" for pdf_page in pdf.pages]
+    except Exception as exc:
+        raise ValueError(f"Could not parse PDF {absolute_url}: {exc}") from exc
+
+    lines = (
+        " ".join(line.split())
+        for page_text in extracted_pages
+        for line in page_text.splitlines()
+    )
+    text = "\n".join(line for line in lines if line)
+    if not text:
+        raise ValueError(f"PDF contained no extractable text: {absolute_url}")
+    return text
+
+
+def extract_victorian_sarc_text(page: Page, rendered_html: str) -> str:
+    """Extract the Victorian SARC Introduction print – Bill PDF text."""
+    soup = BeautifulSoup(rendered_html, "html.parser")
+    target_label = normalized_label("Introduction print – Bill")
+    heading = next(
+        (
+            candidate
+            for candidate in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+            if normalized_label(candidate.get_text(" ", strip=True)) == target_label
+        ),
+        None,
+    )
+    if heading is None:
+        raise ValueError("Victorian SARC: 'Introduction print – Bill' panel not found")
+
+    panel = heading.find_parent(
+        "div", class_="tide-bill-intro__section-document"
+    ) or heading.parent
+    pdf_anchor = next(
+        (
+            anchor
+            for anchor in panel.find_all("a", href=True)
+            if is_pdf_link(anchor.get("href"))
+        ),
+        None,
+    )
+    if pdf_anchor is None:
+        raise ValueError(
+            "Victorian SARC: PDF link not found in 'Introduction print – Bill' panel"
+        )
+    return extract_pdf_text(page, pdf_anchor["href"])
+
+
+def extract_vewh_text(page: Page, rendered_html: str) -> str:
+    """Extract the VEWH Section 1 Introduction PDF text."""
+    soup = BeautifulSoup(rendered_html, "html.parser")
+    target_label = normalized_label("Section 1 Introduction")
+    pdf_anchor = next(
+        (
+            anchor
+            for anchor in soup.find_all("a", href=True)
+            if is_pdf_link(anchor.get("href"))
+            and target_label
+            in {
+                normalized_label(anchor.get("title", "")),
+                normalized_label(anchor.get_text(" ", strip=True)),
+            }
+        ),
+        None,
+    )
+    if pdf_anchor is None:
+        raise ValueError("VEWH: 'Section 1 Introduction' PDF link not found")
+    return extract_pdf_text(page, pdf_anchor["href"])
+
+
+def extract_joint_treaties_text(page: Page, rendered_html: str) -> str:
+    """Extract the Joint Treaties National Interest Analysis PDF text."""
+    soup = BeautifulSoup(rendered_html, "html.parser")
+    target_label = normalized_label("National Interest Analysis")
+    paragraph = next(
+        (
+            candidate
+            for candidate in soup.find_all("p")
+            if normalized_label(candidate.get_text(" ", strip=True)).startswith(
+                target_label
+            )
+        ),
+        None,
+    )
+    if paragraph is None:
+        raise ValueError("Joint Treaties: 'National Interest Analysis' paragraph not found")
+
+    pdf_anchor = next(
+        (
+            anchor
+            for anchor in paragraph.find_all("a", href=True)
+            if is_pdf_link(anchor.get("href"))
+        ),
+        None,
+    )
+    if pdf_anchor is None:
+        raise ValueError(
+            "Joint Treaties: National Interest Analysis PDF link not found"
+        )
+    return extract_pdf_text(page, pdf_anchor["href"])
+
+
+def extract_source_text(source: Source, page: Page, rendered_html: str) -> str:
+    """Dispatch sources that require targeted documents to dedicated extractors."""
+    if source.name == "Victorian Environmental Water Holder":
+        return extract_vewh_text(page, rendered_html)
+    if source.name == "Scrutiny of Acts and Regulations Committee – environment filter":
+        return extract_victorian_sarc_text(page, rendered_html)
+    if source.name == "Joint Treaties – environment-related only":
+        return extract_joint_treaties_text(page, rendered_html)
+    return extract_page_text(rendered_html)
+
+
 def source_slug(source: Source) -> str:
     """Return a stable, filesystem-safe slug for a source."""
     normalized = unicodedata.normalize("NFKD", source.name).encode("ascii", "ignore")
@@ -311,10 +448,12 @@ def process_sources(
                         page = browser.new_page()
                         try:
                             rendered_html = fetch_rendered_html(page, source.url)
+                            page_text = extract_source_text(
+                                source, page, rendered_html
+                            )
                         finally:
                             page.close()
 
-                        page_text = extract_page_text(rendered_html)
                         if not page_text:
                             raise ValueError("rendered page contained no readable text")
                         output_path = write_processed_text(source, page_text, output_dir)
