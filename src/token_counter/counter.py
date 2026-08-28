@@ -139,7 +139,7 @@ SOURCES = (
     # Joint Aboriginal and Torres Strait Islander Affairs
     Source("Joint Aboriginal and Torres Strait Islander Affairs", "https://www.aph.gov.au/Parliamentary_Business/Committees/Joint/Aboriginal_and_Torres_Strait_Islander_Affairs/Responsestoracism"),
     # Joint Treaties – environment-related only
-    Source("Joint Treaties – environment-related only", "https://www.aph.gov.au/Parliamentary_Business/Committees/Joint/Treaties/2025CITESAmendments"),
+    Source("Joint Treaties – environment-related only", "https://www.aph.gov.au/Parliamentary_Business/Committees/Joint/Treaties/2025CITESAmendments/Treaty_being_considered"),
     # Joint Northern Australia
     Source("Joint Northern Australia", "https://www.aph.gov.au/Parliamentary_Business/Committees/Joint/Northern_Australia/Industries"),
 )
