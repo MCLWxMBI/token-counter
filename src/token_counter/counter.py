@@ -1,5 +1,8 @@
-import argparse
-import os
+# =============================================================================
+# BEGIN REUSABLE WEBSITE TEXT EXTRACTION HELPERS
+# Copy this section into helpers.py in another project.
+# =============================================================================
+
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -7,115 +10,9 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import urljoin
 
-import anthropic
-import matplotlib
 import pdfplumber
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Page, sync_playwright
-
-
-DEFAULT_MODEL = "claude-sonnet-4-6"
-DEFAULT_INPUT_PRICE = 3.0
-DEFAULT_OUTPUT_DIR = Path("tmp")
-PDF_SOURCE_NAMES = frozenset(
-    {
-        "Victorian Environmental Water Holder",
-        "Scrutiny of Acts and Regulations Committee – environment filter",
-        "Joint Treaties – environment-related only",
-    }
-)
-
-STABLE_CONTENT_SCRIPT = """
-({ minimumCharacters, quietMilliseconds, timeoutMilliseconds }) =>
-  new Promise((resolve, reject) => {
-    const selectors = ["main", "[role='main']", "article", "#app", "body"];
-    const target = selectors
-      .map((selector) => document.querySelector(selector))
-      .find((element) => element !== null);
-
-    if (!target) {
-      reject(new Error("No page content root was found"));
-      return;
-    }
-
-    const loadingPlaceholders = [
-      "loading",
-      "slow connection",
-      "try refresh",
-      "please wait",
-      "enable javascript",
-    ];
-    let quietTimer;
-    let timeoutTimer;
-    let lastText = "";
-
-    const normalizedText = () =>
-      (target.innerText || "").replace(/\\s+/g, " ").trim();
-
-    const isMeaningful = (text) => {
-      if (text.length < minimumCharacters) {
-        return false;
-      }
-      const lowerText = text.toLowerCase();
-      return !loadingPlaceholders.some(
-        (placeholder) =>
-          lowerText === placeholder ||
-          (lowerText.length < 500 && lowerText.includes(placeholder)),
-      );
-    };
-
-    const cleanup = () => {
-      observer.disconnect();
-      clearTimeout(quietTimer);
-      clearTimeout(timeoutTimer);
-    };
-
-    const checkContent = () => {
-      clearTimeout(quietTimer);
-      lastText = normalizedText();
-      if (!isMeaningful(lastText)) {
-        return;
-      }
-      quietTimer = setTimeout(() => {
-        const currentText = normalizedText();
-        if (currentText === lastText && isMeaningful(currentText)) {
-          cleanup();
-          resolve(true);
-        }
-      }, quietMilliseconds);
-    };
-
-    const observer = new MutationObserver(checkContent);
-    observer.observe(target, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: false,
-    });
-
-    timeoutTimer = setTimeout(() => {
-      cleanup();
-      const preview = lastText.slice(0, 160);
-      reject(
-        new Error(
-          `Page content did not stabilize within ${timeoutMilliseconds}ms; ` +
-          `last text length=${lastText.length}; preview=${JSON.stringify(preview)}`,
-        ),
-      );
-    }, timeoutMilliseconds);
-
-    checkContent();
-  })
-"""
-
-load_dotenv(Path(__file__).with_name(".env"))
-
+from playwright.sync_api import Browser, Page
 
 @dataclass(frozen=True)
 class Source:
@@ -123,19 +20,18 @@ class Source:
     url: str
 
 
-@dataclass(frozen=True)
-class SourceResult:
-    source: Source
-    processed_bytes: int
-    input_tokens: int
-    estimated_cost: float
-    output_path: Path
-
-
-@dataclass(frozen=True)
-class SourceFailure:
-    source: Source
-    error: str
+VEWH_SOURCE_NAME = "Victorian Environmental Water Holder"
+SARC_SOURCE_NAME = (
+    "Scrutiny of Acts and Regulations Committee – environment filter"
+)
+JOINT_TREATIES_SOURCE_NAME = "Joint Treaties – environment-related only"
+PDF_SOURCE_NAMES = frozenset(
+    {
+        VEWH_SOURCE_NAME,
+        SARC_SOURCE_NAME,
+        JOINT_TREATIES_SOURCE_NAME,
+    }
+)
 
 
 # Victoria: sources
@@ -236,6 +132,71 @@ SOURCES = (
     # Joint Northern Australia
     Source("Joint Northern Australia", "https://www.aph.gov.au/Parliamentary_Business/Committees/Joint/Northern_Australia/Industries"),
 )
+
+
+STABLE_CONTENT_SCRIPT = """
+({ minimumCharacters, quietMilliseconds, timeoutMilliseconds }) =>
+  new Promise((resolve, reject) => {
+    const selectors = ["main", "[role='main']", "article", "#app", "body"];
+    const target = selectors.map((selector) => document.querySelector(selector))
+      .find((element) => element !== null);
+    if (!target) {
+      reject(new Error("No page content root was found"));
+      return;
+    }
+
+    const loadingPlaceholders = [
+      "loading", "slow connection", "try refresh", "please wait",
+      "enable javascript",
+    ];
+    let quietTimer;
+    let timeoutTimer;
+    let lastText = "";
+    const normalizedText = () =>
+      (target.innerText || "").replace(/\\s+/g, " ").trim();
+    const isMeaningful = (text) => {
+      if (text.length < minimumCharacters) return false;
+      const lowerText = text.toLowerCase();
+      return !loadingPlaceholders.some(
+        (placeholder) => lowerText === placeholder ||
+          (lowerText.length < 500 && lowerText.includes(placeholder)),
+      );
+    };
+    const cleanup = () => {
+      observer.disconnect();
+      clearTimeout(quietTimer);
+      clearTimeout(timeoutTimer);
+    };
+    const checkContent = () => {
+      clearTimeout(quietTimer);
+      lastText = normalizedText();
+      if (!isMeaningful(lastText)) return;
+      quietTimer = setTimeout(() => {
+        const currentText = normalizedText();
+        if (currentText === lastText && isMeaningful(currentText)) {
+          cleanup();
+          resolve(true);
+        }
+      }, quietMilliseconds);
+    };
+    const observer = new MutationObserver(checkContent);
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: false,
+    });
+    timeoutTimer = setTimeout(() => {
+      cleanup();
+      const preview = lastText.slice(0, 160);
+      reject(new Error(
+        `Page content did not stabilize within ${timeoutMilliseconds}ms; ` +
+        `last text length=${lastText.length}; preview=${JSON.stringify(preview)}`,
+      ));
+    }, timeoutMilliseconds);
+    checkContent();
+  })
+"""
 
 
 def fetch_rendered_html(page: Page, url: str) -> str:
@@ -346,8 +307,6 @@ def extract_pdf_text(page: Page, pdf_url: str) -> str:
         for line in page_text.splitlines()
     )
     text = "\n".join(line for line in lines if line)
-    if not text:
-        raise ValueError(f"PDF contained no extractable text: {absolute_url}")
     return text
 
 
@@ -438,37 +397,62 @@ def extract_joint_treaties_text(page: Page, rendered_html: str) -> str:
     return extract_pdf_text(page, pdf_anchor["href"])
 
 
-def extract_source_text(source: Source, page: Page, rendered_html: str) -> str:
-    """Dispatch sources that require targeted documents to dedicated extractors."""
-    if source.name == "Victorian Environmental Water Holder":
-        return extract_vewh_text(page, rendered_html)
-    if source.name == "Scrutiny of Acts and Regulations Committee – environment filter":
-        return extract_victorian_sarc_text(page, rendered_html)
-    if source.name == "Joint Treaties – environment-related only":
-        return extract_joint_treaties_text(page, rendered_html)
-    return extract_page_text(rendered_html)
+def process_single_source(source: Source, browser: Browser) -> str:
+    """Render one source, select its extraction strategy, and return text."""
+    page = browser.new_page()
+    try:
+        fetch_rendered_html(page, source.url)
+        wait_for_stable_page_content(page)
+        rendered_html = page.content()
+        if source.name == VEWH_SOURCE_NAME:
+            return extract_vewh_text(page, rendered_html)
+        if source.name == SARC_SOURCE_NAME:
+            return extract_victorian_sarc_text(page, rendered_html)
+        if source.name == JOINT_TREATIES_SOURCE_NAME:
+            return extract_joint_treaties_text(page, rendered_html)
+        return extract_page_text(rendered_html)
+    finally:
+        page.close()
 
 
-def is_pdf_source(source: Source) -> bool:
-    return source.name in PDF_SOURCE_NAMES
+# =============================================================================
+# END REUSABLE WEBSITE TEXT EXTRACTION HELPERS
+# =============================================================================
+
+import argparse
+import os
+
+import anthropic
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+from dotenv import load_dotenv
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import sync_playwright
 
 
-def process_source_content(source: Source, page: Page) -> str:
-    """Render one source, wait for stability, and return token-count text."""
-    fetch_rendered_html(page, source.url)
-    wait_for_stable_page_content(page)
-    rendered_html = page.content()
-    page_text = extract_source_text(source, page, rendered_html)
+DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_INPUT_PRICE = 3.0
+DEFAULT_OUTPUT_DIR = Path("tmp")
 
-    if not page_text:
-        raise ValueError("rendered page contained no readable text")
-    if not is_pdf_source(source) and len(page_text) < 200:
-        preview = page_text[:160]
-        raise ValueError(
-            "rendered page contained fewer than 200 extracted characters; "
-            f"length={len(page_text)}; preview={preview!r}"
-        )
-    return page_text
+load_dotenv(Path(__file__).with_name(".env"))
+
+
+@dataclass(frozen=True)
+class SourceResult:
+    source: Source
+    processed_bytes: int
+    input_tokens: int
+    estimated_cost: float
+    output_path: Path
+
+
+@dataclass(frozen=True)
+class SourceFailure:
+    source: Source
+    error: str
 
 
 def source_slug(source: Source) -> str:
@@ -513,18 +497,6 @@ def write_processed_text(
     return output_path
 
 
-def count_input_tokens(
-    content: str,
-    model: str,
-    client: anthropic.Anthropic,
-) -> int:
-    result = client.messages.count_tokens(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-    )
-    return result.input_tokens
-
-
 def write_token_chart(
     results: list[SourceResult],
     output_path: Path,
@@ -550,61 +522,6 @@ def write_token_chart(
     plt.close(figure)
 
 
-def process_sources(
-    sources: tuple[Source, ...],
-    model: str,
-    input_price: float,
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
-) -> tuple[list[SourceResult], list[SourceFailure]]:
-    """Render, extract, save, and count every source in a single browser run."""
-    validate_sources(sources)
-    client = anthropic.Anthropic()
-    results: list[SourceResult] = []
-    failures: list[SourceFailure] = []
-    cache: dict[str, tuple[str, int] | Exception] = {}
-
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        try:
-            for source in sources:
-                cached = cache.get(source.url)
-                if isinstance(cached, Exception):
-                    failures.append(SourceFailure(source, str(cached)))
-                    continue
-
-                try:
-                    if cached is None:
-                        page = browser.new_page()
-                        try:
-                            page_text = process_source_content(source, page)
-                        finally:
-                            page.close()
-
-                        output_path = write_processed_text(source, page_text, output_dir)
-                        input_tokens = count_input_tokens(page_text, model, client)
-                        cache[source.url] = (page_text, input_tokens)
-                    else:
-                        page_text, input_tokens = cached
-                        output_path = write_processed_text(source, page_text, output_dir)
-
-                    results.append(
-                        SourceResult(
-                            source=source,
-                            processed_bytes=len(page_text.encode("utf-8")),
-                            input_tokens=input_tokens,
-                            estimated_cost=input_tokens / 1_000_000 * input_price,
-                            output_path=output_path,
-                        )
-                    )
-                except (PlaywrightError, anthropic.APIError, OSError, ValueError) as exc:
-                    cache[source.url] = exc
-                    failures.append(SourceFailure(source, str(exc)))
-        finally:
-            browser.close()
-
-    return results, failures
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render configured websites and compare their Claude input cost."
@@ -625,17 +542,77 @@ def main() -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit("Set ANTHROPIC_API_KEY before running this command.")
 
-    print(f"Processing {len(SOURCES)} configured sources...", flush=True)
     try:
-        results, failures = process_sources(
-            SOURCES,
-            model=args.model,
-            input_price=args.input_price,
-        )
-    except PlaywrightError as exc:
-        raise SystemExit(f"Could not start or use Chromium: {exc}") from exc
+        validate_sources(SOURCES)
     except ValueError as exc:
         raise SystemExit(f"Invalid source configuration: {exc}") from exc
+
+    print(f"Processing {len(SOURCES)} configured sources...", flush=True)
+    client = anthropic.Anthropic()
+    results: list[SourceResult] = []
+    failures: list[SourceFailure] = []
+    cache: dict[str, tuple[str, int] | Exception] = {}
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                for source in SOURCES:
+                    cached = cache.get(source.url)
+                    if isinstance(cached, Exception):
+                        failures.append(SourceFailure(source, str(cached)))
+                        continue
+
+                    try:
+                        if cached is None:
+                            page_text = process_single_source(source, browser)
+
+                            if source.name in PDF_SOURCE_NAMES:
+                                if not page_text:
+                                    raise ValueError(
+                                        "PDF contained no extractable text"
+                                    )
+                            elif len(page_text) < 200:
+                                raise ValueError(
+                                    "HTML contained fewer than 200 extracted "
+                                    f"characters; length={len(page_text)}; "
+                                    f"preview={page_text[:160]!r}"
+                                )
+
+                            output_path = write_processed_text(source, page_text)
+                            token_result = client.messages.count_tokens(
+                                model=args.model,
+                                messages=[{"role": "user", "content": page_text}],
+                            )
+                            input_tokens = token_result.input_tokens
+                            cache[source.url] = (page_text, input_tokens)
+                        else:
+                            page_text, input_tokens = cached
+                            output_path = write_processed_text(source, page_text)
+
+                        results.append(
+                            SourceResult(
+                                source=source,
+                                processed_bytes=len(page_text.encode("utf-8")),
+                                input_tokens=input_tokens,
+                                estimated_cost=(
+                                    input_tokens / 1_000_000 * args.input_price
+                                ),
+                                output_path=output_path,
+                            )
+                        )
+                    except (
+                        PlaywrightError,
+                        anthropic.APIError,
+                        OSError,
+                        ValueError,
+                    ) as exc:
+                        cache[source.url] = exc
+                        failures.append(SourceFailure(source, str(exc)))
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        raise SystemExit(f"Could not start or use Chromium: {exc}") from exc
 
     chart_path = DEFAULT_OUTPUT_DIR / "input-token-counts.png"
     write_token_chart(results, chart_path, args.model)
